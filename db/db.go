@@ -2,7 +2,6 @@ package db
 
 import (
 	"errors"
-	"fmt"
 	"strconv"
 
 	"github.com/go-redis/redis"
@@ -125,7 +124,6 @@ func (acc *Accessor) FetchToken(key string) (bool, error) {
 		return false, err
 	}
 
-	fmt.Println(res)
 	if err == redis.Nil {
 		return false, nil
 	}

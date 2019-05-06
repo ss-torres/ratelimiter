@@ -65,7 +65,22 @@ func testKeyNum(t *testing.T, acc *Accessor, key string, keyNum int) bool {
 	}
 
 	if fetchKeyNum != keyNum {
-		t.Errorf("keyNum should be %d, fetchKeyNum is %d\n", keyNum, fetchKeyNum)
+		t.Errorf("fetchKeyNum should be %d, fetchKeyNum is %d\n", keyNum, fetchKeyNum)
+		return false
+	}
+
+	return true
+}
+
+func testKeyIdx(t *testing.T, acc *Accessor, key string, keyIdx int) bool {
+	fetchIdx, err := acc.GetKeyIdx(key)
+	if err != nil {
+		t.Errorf("acc.GetKeyIdx error: %v\n", err)
+		return false
+	}
+
+	if fetchIdx != keyIdx {
+		t.Errorf("fetchIdx should be %d, fetchIdx is %d\n", keyIdx, fetchIdx)
 		return false
 	}
 
@@ -139,6 +154,11 @@ func Test_NewAccessor(t *testing.T) {
 		return
 	}
 	targetIdx++
+
+	suc = testKeyIdx(t, acc, key, targetIdx)
+	if !suc {
+		return
+	}
 
 	suc = testKeyNum(t, acc, key, keyLimit)
 	if !suc {
