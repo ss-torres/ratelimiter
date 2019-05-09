@@ -1,8 +1,10 @@
 package db
 
 import (
+	"bytes"
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/go-redis/redis"
 )
@@ -13,29 +15,42 @@ import (
 // (2) 通过idx来标识这次修改的序号, 从而确保多个增加令牌桶的调用, 在多个增加令牌的应用存在的情况下,不会出现较大的异常
 //
 // redis中存储的结构
-// 以下描述中[:variable:]表示会改变的值, 其中[:key:]不要包含下划线
-// {[:key:]}_idx			类型: redis中的string, 实现存储一个数字,表示修改的idx
+// 以下描述中[:variable:]表示会改变的值, 其中[:key:]对使用的字母有所限制
+// {[:key:]}			类型: redis中的string, 实现存储一个数字,表示修改的idx
 // [:key:]				类型: redis中的string, 实现存储一个数字,表示当前的限流
 
-const (
-	keySuffix = "_idx"
-)
+// CheckKeyValid 用来检测一个key是否有效, 这里包括两部分
+// (1) [:key:]和{[:key:]} hash到同一个槽
+// (2) [:key1:]和{[:key2:]}不会相同
+func CheckKeyValid(keyStr string) bool {
+	// 如果keyStr中存在右括号(})则视为无效,这个条件可能稍微严格了一点,
+	// 因为如果keyStr的第一个字母为右括号(}),应该也不会有问题
+	if len(keyStr) == 0 || strings.Contains(keyStr, "}") {
+		return false
+	}
+
+	return true
+}
 
 // getKeyIdx 用来获取修改的idx
 func getKeyIdx(keyStr string) string {
-	return keyStr + keySuffix
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	buf.WriteString(keyStr)
+	buf.WriteByte('}')
+	return buf.String()
 }
 
 // Accessor 用来表示访问的对象
 type Accessor struct {
-	client *redis.Client
+	client redis.UniversalClient
 }
 
 // NewAccessor 用来构建一个访问redis的句柄
-func NewAccessor(addr string, pwd string) (*Accessor, error) {
-	// addrSlice := strings.Split(addrs, " ")
-	client := redis.NewClient(&redis.Options{
-		Addr:     addr,
+func NewAccessor(addrs string, pwd string) (*Accessor, error) {
+	addrSlice := strings.Split(addrs, " ")
+	client := redis.NewUniversalClient(&redis.UniversalOptions{
+		Addrs:    addrSlice,
 		Password: pwd,
 	})
 

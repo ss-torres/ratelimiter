@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"testing"
 )
@@ -16,6 +17,9 @@ var dbPWD string
 var key string
 
 func init() {
+	if len(os.Args) < 4 {
+		log.Fatal(`please enter like: go test ratelimiter/db -args "localhost:6379" "" "hello"`)
+	}
 	dbAddrs = os.Args[1]
 	dbPWD = os.Args[2]
 	key = os.Args[3]
@@ -23,6 +27,10 @@ func init() {
 	fmt.Println("database address:", dbAddrs)
 	fmt.Println("database password:", dbPWD)
 	fmt.Println("key:", key)
+
+	if !CheckKeyValid(key) {
+		log.Fatal("key isn't valid")
+	}
 }
 
 func clearKey(t *testing.T, acc *Accessor, key string) bool {
