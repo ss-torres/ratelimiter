@@ -7,5 +7,5 @@
 (2) key_idx  
 其中key记录当前的限制次数, key_idx记录当前修改的序号  
 
-如果想调用db_test.go中的测试, 可以参考如下命令:
+如果想调用db_test.go中的测试, 可以参考如下命令:  
 go test ratelimiter/db -args "localhost:6379" "" "hello"
