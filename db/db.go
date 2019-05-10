@@ -147,7 +147,7 @@ func (acc *Accessor) FetchToken(key string) (bool, error) {
 		return (val == 1), nil
 	}
 
-	return false, errors.New("res should be bool")
+	return false, errors.New("res should be int64")
 }
 
 // AddToken 用来添加某个key的令牌
@@ -186,5 +186,5 @@ func (acc *Accessor) AddToken(key string, keyIdx int, keyAdd int, keyLimit int) 
 		return int(idx), nil
 	}
 
-	return 0, errors.New("res should be integer")
+	return 0, errors.New("res should be int64")
 }
