@@ -41,6 +41,24 @@ func getKeyIdx(keyStr string) string {
 	return buf.String()
 }
 
+// newClient 用来构建新的redis的client
+func newClient(addrs string, pwd string) (redis.UniversalClient, error) {
+	addrSlice := strings.Split(addrs, " ")
+	client := redis.NewUniversalClient(&redis.UniversalOptions{
+		Addrs:    addrSlice,
+		Password: pwd,
+	})
+
+	// 尝试连接， 查看是否正常
+	_, err := client.Ping().Result()
+	if err != nil {
+		client.Close()
+		return nil, err
+	}
+
+	return client, nil
+}
+
 // Accessor 用来表示访问的对象
 type Accessor struct {
 	client redis.UniversalClient
@@ -48,14 +66,7 @@ type Accessor struct {
 
 // NewAccessor 用来构建一个访问redis的句柄
 func NewAccessor(addrs string, pwd string) (*Accessor, error) {
-	addrSlice := strings.Split(addrs, " ")
-	client := redis.NewUniversalClient(&redis.UniversalOptions{
-		Addrs:    addrSlice,
-		Password: pwd,
-	})
-
-	// 尝试连接, 查看是否正常
-	_, err := client.Ping().Result()
+	client, err := newClient(addrs, pwd)
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +74,11 @@ func NewAccessor(addrs string, pwd string) (*Accessor, error) {
 	return &Accessor{
 		client: client,
 	}, nil
+}
+
+// GetClient 用来返回redis的Client对象
+func (acc *Accessor) GetClient() redis.UniversalClient {
+	return acc.client
 }
 
 // Close 用来清理连接
@@ -139,7 +155,7 @@ func (acc *Accessor) FetchToken(key string) (bool, error) {
 		return false, err
 	}
 
-	if err == redis.Nil {
+	if res == redis.Nil {
 		return false, nil
 	}
 
