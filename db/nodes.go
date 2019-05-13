@@ -81,6 +81,7 @@ func (lnode *ListenNode) handleConnection(wg *sync.WaitGroup, conn net.Conn) {
 			}
 			if string(buf) != nodeReq {
 				log.Printf("request sent by nodes isn't invalid")
+				// 部分发送不知道在这里会不会产生错误影响
 				return
 			}
 			_, err = conn.Write([]byte(nodeRsp))
@@ -115,7 +116,7 @@ func (lnode *ListenNode) Close() {
 
 // NodeInfo 用来存储节点信息
 type NodeInfo struct {
-	Name      string
+	Addr      string
 	FailCount int // 用来统计连续发送失败次数
 	TCPConn   net.Conn
 }
@@ -161,11 +162,19 @@ func (t *SendNodes) getNodeAddrs() []string {
 func (t *SendNodes) getFailNode() (string, bool) {
 	for _, val := range t.nodes {
 		if val.FailCount > t.maxFailNum {
-			return val.Name, true
+			return val.Addr, true
 		}
 	}
 
 	return "", false
+}
+
+// resetFailNode 表示重新进行这个失败节点计数
+func (t *SendNodes) resetFailNode(failNodeAddr string) {
+	node, ok := t.nodes[failNodeAddr]
+	if ok {
+		node.FailCount = 0
+	}
 }
 
 // insertNodeIgnoreErr 用于插入节点，插入节点的同时，建立tcp连接
@@ -185,35 +194,11 @@ func (t *SendNodes) insertNodeIgnoreErr(nodeAddr string) {
 		failCount = t.maxFailNum
 	}
 	node = &NodeInfo{
-		Name:      nodeAddr,
+		Addr:      nodeAddr,
 		FailCount: failCount,
 		TCPConn:   conn,
 	}
 }
-
-//// insertNode 用于插入节点， 插入节点的同时，建立tcp连接
-//func (t *SendNodes) insertNode(nodeAddr string) error {
-//	ctx, cancel := context.WithTimeout(context.Background(), t.dialTimeOut())
-//	defer cancel()
-//
-//	conn, err := t.dialer.DialContext(ctx, "tcp", nodeAddr)
-//	if err != nil {
-//		return err
-//	}
-//
-//	node := t.nodes[nodeAddr]
-//	// 如果node非nil，这个不应该出现，如果出现，则关闭连接
-//	if node != nil {
-//		node.TCPConn.Close()
-//	}
-//	// 设置新值
-//	node = &NodeInfo{
-//		Name:      nodeAddr,
-//		FailCount: 0,
-//		TCPConn:   conn,
-//	}
-//	return nil
-//}
 
 // deleteNode 用来移除节点， 移除节点的同时，断开tcp连接
 func (t *SendNodes) deleteNode(nodeAddr string) {
@@ -224,15 +209,38 @@ func (t *SendNodes) deleteNode(nodeAddr string) {
 	}
 }
 
-//// replaceNode 用一个节点取代另外一个节点
-//func (t *SendNodes) replaceNodeIgnoreErr(nodeAddr string, newNodeAddr string) {
-//	t.insertNodeIgnoreErr(newNodeAddr)
-//	if nodeAddr == newNodeAddr {
-//		return
-//	}
-//
-//	t.deleteNode(nodeAddr)
-//}
+// SendMsg 用来向其他节点发送消息
+func (t *SendNodes) SendMsg(wg *sync.WaitGroup, timeOut time.Duration) {
+	for _, node := range t.nodes {
+		wg.Add(1)
+		go func(node *NodeInfo) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), timeOut)
+			defer cancel()
+
+			var err error
+			// 如果没有建立连接，则尝试使用1s建立连接
+			if node.TCPConn == nil {
+				node.TCPConn, err = t.dialer.DialContext(ctx, "tcp", node.Addr)
+				// 如果失败，则增加一个新的失败计数，然后退出
+				if err != nil {
+					node.FailCount++
+					return
+				}
+			}
+			// 尝试发送数据，如果失败，则失败计数加1，如果成功，则清除计数，这里发送部分数据不知道会不会使其一直失败
+			node.TCPConn.SetWriteDeadline(time.Now().Add(timeOut))
+			_, err = node.TCPConn.Write([]byte("PING"))
+			node.TCPConn.SetWriteDeadline(time.Time{})
+			if err != nil {
+				log.Printf("node.TCPConn.Write error: %v\n", err)
+				node.FailCount++
+				return
+			}
+			node.FailCount = 0
+		}(node)
+	}
+}
 
 // closeNodes 用来关闭所有的tcp连接
 func (t *SendNodes) closeNodes() {

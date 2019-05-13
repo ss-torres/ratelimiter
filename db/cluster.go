@@ -49,12 +49,13 @@ const (
 
 // InitConfig 用来初始化Maintainer
 type InitConfig struct {
-	maxTargetNum  int    // "加令牌节点"主动联系的其他"加令牌节点"最大的个数
-	maxFailNum    int    // "加令牌节点"标记其他"加令牌节点"不可用需要尝试的发送消息的次数，当前每秒发送一次
-	nodeAddr      string // 监听的地址
-	maxAddNodeNum int    // 集群中最大的"加令牌节点"的个数
-	redisAddr     string // redis的地址
-	redisPWD      string // redis的密码
+	maxTargetNum    int    // "加令牌节点"主动联系的其他"加令牌节点"最大的个数
+	maxFailNum      int    // "加令牌节点"标记其他"加令牌节点"不可用需要尝试的发送消息的次数，当前每秒发送一次
+	maxFailResetNum int    // 失败重设节点的状态之后等待的时间
+	nodeAddr        string // 监听的地址
+	maxAddNodeNum   int    // 集群中最大的"加令牌节点"的个数
+	redisAddr       string // redis的地址
+	redisPWD        string // redis的密码
 }
 
 // NewInitConfig 用来创建InitConfig
@@ -72,14 +73,15 @@ func NewInitConfig(maxTargetNum int, maxFailNum int, nodeAddr string,
 
 // Maintainer 用来维持这个集群始终存在若干"加令牌节点"
 type Maintainer struct {
-	client        redis.UniversalClient
-	pwg           *sync.WaitGroup
-	toNodes       *SendNodes    // 主动通信的"加令牌节点"
-	fromNode      *ListenNode   // 监听节点
-	pubsub        *redis.PubSub // 用来监听redis的键空间事件
-	nodeAddr      string        // 用来设置这个节点的标识, 这个标识的监听通信的端口
-	maxAddNodeNum int           // 设置这个集群需要的"加令牌节点"个数
-	isAddNode     bool          // 是否为"加令牌节点"
+	client          redis.UniversalClient
+	pwg             *sync.WaitGroup
+	toNodes         *SendNodes    // 主动通信的"加令牌节点"
+	fromNode        *ListenNode   // 监听节点
+	maxFailResetNum int           // 标识"加令牌节点"无效之后，等待的时间
+	pubsub          *redis.PubSub // 用来监听redis的键空间事件
+	nodeAddr        string        // 用来设置这个节点的标识, 这个标识的监听通信的端口
+	maxAddNodeNum   int           // 设置这个集群需要的"加令牌节点"个数
+	isAddNode       bool          // 是否为"加令牌节点"
 	// 通信相关
 	keyMsgChan <-chan *redis.Message
 }
@@ -110,13 +112,14 @@ func NewMaintainer(client redis.UniversalClient, config *InitConfig) (m *Maintai
 	}()
 
 	m = &Maintainer{
-		client:        client,
-		pwg:           &wg,
-		toNodes:       toNodes,
-		fromNode:      fromNode,
-		nodeAddr:      config.nodeAddr,
-		maxAddNodeNum: config.maxAddNodeNum,
-		isAddNode:     false,
+		client:          client,
+		pwg:             &wg,
+		toNodes:         toNodes,
+		fromNode:        fromNode,
+		maxFailResetNum: config.maxFailResetNum,
+		nodeAddr:        config.nodeAddr,
+		maxAddNodeNum:   config.maxAddNodeNum,
+		isAddNode:       false,
 	}
 
 	err = m.subscribeClusterNotify(config.redisAddr, config.redisPWD)
@@ -154,20 +157,22 @@ func (m *Maintainer) Close() {
 		m.fromNode.Close()
 	}
 	m.closeNotify()
+
+	m.Wait()
 }
 
 // 获取有效的节点在redis中如何存储
-func getValidNodeStr(nodeAddr string) string {
+func getValidNodeAddr(nodeAddr string) string {
 	return "1:" + nodeAddr
 }
 
 // 获取无效的节点在redis中如何存储
-func getInvalidNodeStr(nodeAddr string) string {
+func getInvalidNodeAddr(nodeAddr string) string {
 	return "0:" + nodeAddr
 }
 
 // 根据有效或者无效节点获取实际节点
-func getRealNodeStr(nodeAddr string) (string, error) {
+func getRealNodeAddr(nodeAddr string) (string, error) {
 	idx := strings.IndexByte(nodeAddr, ':')
 	if idx == -1 && idx < len(nodeAddr)-1 {
 		return "", errors.New(`nodeAddr should contains ':'`)
@@ -281,22 +286,57 @@ func (m *Maintainer) handleRemMsg() error {
 	return nil
 }
 
+// handleSetMsg 用来处理设置消息
+func (m *Maintainer) handleSetMsg(failNodeAddr *string) error {
+	if !m.isAddNode {
+		return nil
+	}
+	// 这里需要处理两种情况，
+	// (1) 有节点被设置为无效
+	// (2) 有节点又被设置为有效
+
+	// 处理(1)，如果自身被设置无效，则恢复有效
+	_, err := m.resetAddNode(getInvalidNodeAddr(m.nodeAddr), getValidNodeAddr(m.nodeAddr))
+	if err != nil {
+		return err
+	}
+	// 处理（2)，如果有节点被设置有效，查看是否为自己监听的失败接口
+	ok, err := m.findAddNode(getValidNodeAddr(*failNodeAddr))
+	if err != nil {
+		return err
+	}
+	if ok {
+		*failNodeAddr = ""
+	}
+	return nil
+}
+
 // handleMsg 用来处理消息
-func (m *Maintainer) handleMsg(msg *redis.Message) error {
+func (m *Maintainer) handleMsg(msg *redis.Message, failNodeAddr *string) (int, error) {
 	// 如果这个节点是加令牌节点
 	payload := msg.Payload
-	// 只处理push消息
-	if strings.Contains(payload, "push") {
-		return m.handlePushMsg()
-	} else if strings.Contains(payload, "rem") {
-		return m.handleRemMsg()
+	// 处理消息
+	switch payload {
+	case "lpush":
+		fallthrough
+	case "rpush":
+		return 0, m.handlePushMsg()
+	case "lrem":
+		return 1, m.handleRemMsg()
+	case "lset":
+		return 2, m.handleSetMsg(failNodeAddr)
 	}
 
-	return nil
+	return -1, nil
 }
 
 // RunLoop 是主事件循环
 func (m *Maintainer) RunLoop() error {
+	var realFailNodeAddr string
+	failResetCount := 0
+	var wg sync.WaitGroup
+	timeOut := time.Second
+	timeOutThres := time.Duration(0.99 * float64(timeOut))
 	for {
 		// 处理redis键监听消息
 		var msg *redis.Message
@@ -306,12 +346,53 @@ func (m *Maintainer) RunLoop() error {
 			msg = nil
 		}
 		if msg != nil {
-			m.handleMsg(msg)
+			m.handleMsg(msg, &realFailNodeAddr)
+			// 如果已经清除
+			if len(realFailNodeAddr) == 0 {
+				failResetCount = 0
+				m.toNodes.resetFailNode(realFailNodeAddr)
+			}
 		}
 
-		// 发送消息
-
-		time.Sleep(time.Second)
+		// 如果没有失败的项，则进行必要的tcp通信
+		if len(realFailNodeAddr) == 0 {
+			// 查看是否存在失败的节点
+			failNodeAddr, ok := m.toNodes.getFailNode()
+			if ok {
+				var err error
+				ok, err = m.resetAddNode(getValidNodeAddr(failNodeAddr),
+					getInvalidNodeAddr(failNodeAddr))
+				if err != nil {
+					return err
+				}
+				if !ok {
+					// 如果没有成功，则说明有其他节点这么做
+					m.toNodes.resetFailNode(failNodeAddr)
+				} else {
+					realFailNodeAddr = failNodeAddr
+					failResetCount = 0
+				}
+			}
+			// 如果当前这个节点不存在监听的失败节点
+			if !ok {
+				cur := time.Now()
+				m.toNodes.SendMsg(&wg, timeOut)
+				wg.Wait()
+				duration := time.Now().Sub(cur)
+				if duration < timeOutThres {
+					time.Sleep(timeOut - duration)
+				}
+			}
+		} else {
+			failResetCount++
+			// 如果已经等待了足够的时间，则清理这个无效的节点
+			if failResetCount > m.maxFailResetNum {
+				m.removeInvalidAddNode(realFailNodeAddr)
+				failResetCount = 0
+				realFailNodeAddr = ""
+			}
+			time.Sleep(timeOut)
+		}
 	}
 }
 
@@ -320,7 +401,7 @@ func (m *Maintainer) Wait() {
 	m.pwg.Wait()
 }
 
-// tryBeAddNodes 用来尝试成为"加令牌节点"
+// tryBeAddNode 用来尝试成为"加令牌节点"
 func (m *Maintainer) tryBeAddNode() (bool, error) {
 	/*
 	 * KEYS[1] 表示这个需要操作的键
@@ -342,7 +423,7 @@ func (m *Maintainer) tryBeAddNode() (bool, error) {
 
 	tryBeNodeCmd := redis.NewScript(tryBeNodeScript)
 	res, err := tryBeNodeCmd.Run(m.client, []string{clusterKey},
-		m.maxAddNodeNum, getValidNodeStr(m.nodeAddr)).Result()
+		m.maxAddNodeNum, getValidNodeAddr(m.nodeAddr)).Result()
 	if err != nil && err != redis.Nil {
 		return false, err
 	}
@@ -358,15 +439,93 @@ func (m *Maintainer) tryBeAddNode() (bool, error) {
 	return false, errors.New("res should be int64")
 }
 
+// resetAddNode 用来设置一个加令牌节点的有效和无效状态
+func (m *Maintainer) resetAddNode(curNodeAddr string, setNodeAddr string) (bool, error) {
+	/*
+	 * KEYS[1] 表示这个需要操作的键
+	 * ARGV[1] 表示节点当前的值
+	 * ARGV[2] 表示节点设置的值
+	 */
+	// 实现思路, 如果节点已经够了,则返回结束, 如果节点不够, 则插入成为新的节点
+	resetAddNodeScript :=
+		`--[[测试显示, 通过call, 可以将error返回给客户端, 即使没有使用return]]--
+		local nodeAddrs = redis.call("LRANGE", KEYS[1], 0, -1)
+		for key, value in pairs(nodeAddrs) do
+		if (value == ARGV[1])
+			redis.call("LSET", KEYS[1], key-1, ARGV[2])
+			return true
+		then
+		end
+		end
+		return false
+		`
+
+	resetAddNodeCmd := redis.NewScript(resetAddNodeScript)
+	res, err := resetAddNodeCmd.Run(m.client, []string{clusterKey},
+		curNodeAddr, setNodeAddr).Result()
+	if err != nil && err != redis.Nil {
+		return false, err
+	}
+
+	if res == nil {
+		return false, nil
+	}
+
+	if isAdd, ok := res.(int64); ok {
+		return (isAdd == 1), nil
+	}
+
+	return false, errors.New("res should be int64")
+}
+
+// 查看是否存在某个"加令牌节点"
+func (m *Maintainer) findAddNode(realNodeAddr string) (bool, error) {
+	/*
+	 * KEYS[1] 表示这个需要操作的键
+	 * ARGV[1] 表示节点当前的值
+	 * ARGV[2] 表示节点设置的值
+	 */
+	// 实现思路, 如果节点已经够了,则返回结束, 如果节点不够, 则插入成为新的节点
+	findAddNodeScript :=
+		`--[[测试显示, 通过call, 可以将error返回给客户端, 即使没有使用return]]--
+		local nodeAddrs = redis.call("LRANGE", KEYS[1], 0, -1)
+		for key, value in pairs(nodeAddrs) do
+		if (value == ARGV[1])
+			return true
+		then
+		end
+		end
+		return false
+		`
+
+	findAddNodeCmd := redis.NewScript(findAddNodeScript)
+	res, err := findAddNodeCmd.Run(m.client, []string{clusterKey},
+		realNodeAddr).Result()
+	if err != nil && err != redis.Nil {
+		return false, err
+	}
+
+	if res == nil {
+		return false, nil
+	}
+
+	if isAdd, ok := res.(int64); ok {
+		return (isAdd == 1), nil
+	}
+
+	return false, errors.New("res should be int64")
+
+}
+
 // removeValidAddNode 用来从redis中移除一个有效的"加令牌节点"
 func (m *Maintainer) removeValidAddNode(nodeAddr string) error {
-	realNodeAddr := getValidNodeStr(nodeAddr)
+	realNodeAddr := getValidNodeAddr(nodeAddr)
 	return m.removeAddNode(realNodeAddr)
 }
 
 // removeInvalidAddNode 用来从redis中移除一个无效的"加令牌节点"
 func (m *Maintainer) removeInvalidAddNode(nodeAddr string) error {
-	realNodeAddr := getInvalidNodeStr(nodeAddr)
+	realNodeAddr := getInvalidNodeAddr(nodeAddr)
 	return m.removeAddNode(realNodeAddr)
 }
 
@@ -393,14 +552,14 @@ func (m *Maintainer) getTCPNodeAddrs() ([]string, error) {
 
 // 获取所有节点名
 func (m *Maintainer) getAllNodeAddrs() ([]string, error) {
-	storeNodeIDs, err := m.client.LRange(clusterKey, 0, -1).Result()
+	storeNodeAddrs, err := m.client.LRange(clusterKey, 0, -1).Result()
 	if err != nil {
 		return nil, err
 	}
 
 	var nodeAddrs []string
-	for _, storeID := range storeNodeIDs {
-		nodeAddr, err := getRealNodeStr(storeID)
+	for _, storeID := range storeNodeAddrs {
+		nodeAddr, err := getRealNodeAddr(storeID)
 		if err != nil {
 			return nil, err
 		}
@@ -424,9 +583,9 @@ func (m *Maintainer) getNextNNodeAddrs(nodeAddrs []string) ([]string, bool) {
 	}
 
 	// 插入之后的最多N个节点
-	var targetNodeIDs []string
+	var targetNodeAddrs []string
 	next := idx + 1
-	for len(targetNodeIDs) < m.toNodes.getMaxToNum() {
+	for len(targetNodeAddrs) < m.toNodes.getMaxToNum() {
 		if next == len(nodeAddrs) {
 			next = 0
 		}
@@ -434,8 +593,8 @@ func (m *Maintainer) getNextNNodeAddrs(nodeAddrs []string) ([]string, bool) {
 		if next == idx {
 			break
 		}
-		targetNodeIDs = append(targetNodeIDs, nodeAddrs[next])
+		targetNodeAddrs = append(targetNodeAddrs, nodeAddrs[next])
 		next++
 	}
-	return targetNodeIDs, true
+	return targetNodeAddrs, true
 }
