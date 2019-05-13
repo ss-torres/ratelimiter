@@ -13,3 +13,11 @@
 go test ratelimiter/db -args "localhost:6379" "" "hello"  
 (2) redis集群  
 go test ratelimiter/db -args "localhost:30001 localhost:30002 localhost:30003" "" "hello"
+
+对于使用redis的"{}"键实现的尽量有N个节点作为"加令牌"节点的实现，有如下需要说明：  
+(1) redis需要启动键空间监听，即在redis.conf中添加 notify-keyspace-events Kgl  
+(2) 多个节点启动之前，需要清空redis中的"{}"键，因为，现在的实现无法确定第一个启动的节点   
+(3) 当前的实现，只是用来说明可以通过这种方式实现，实现的细节并不十分完善，而且我没有进行详细的测试，  
+  也没有与更新操作相结合，所以，不建议在实际运行中使用这个实现，我打算使用redis的subscribe和publish  
+  来实现一个更加简单的版本，那个版本应该更合适使用  
+(4) 上述代码中如果存在什么问题，欢迎指出，如果有人对此进行了benchmark，也欢迎添加到README中  

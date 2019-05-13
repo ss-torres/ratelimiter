@@ -17,7 +17,7 @@ func main() {
 
 	redisAddr := "localhost:6379"
 	redisPWD := ""
-	config := db.NewInitConfig(2, 20, *nodeAddr, 3, redisAddr, redisPWD)
+	config := db.NewInitConfig(2, 20, 15, *nodeAddr, 3, redisAddr, redisPWD)
 
 	acc, err := db.NewAccessor(redisAddr, redisPWD)
 	if err != nil {
@@ -27,6 +27,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("db.NewMaintainer error: %v\n", err)
 	}
-	m.RunLoop()
-	m.Wait()
+	err = m.RunLoop()
+	if err != nil {
+		log.Fatalf("m.RunLoop error: %v\n", err)
+	}
 }

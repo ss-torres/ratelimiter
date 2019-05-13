@@ -193,7 +193,7 @@ func (t *SendNodes) insertNodeIgnoreErr(nodeAddr string) {
 	if err != nil {
 		failCount = t.maxFailNum
 	}
-	node = &NodeInfo{
+	t.nodes[nodeAddr] = &NodeInfo{
 		Addr:      nodeAddr,
 		FailCount: failCount,
 		TCPConn:   conn,
@@ -247,4 +247,10 @@ func (t *SendNodes) closeNodes() {
 	for _, node := range t.nodes {
 		node.TCPConn.Close()
 	}
+}
+
+// clearNodes 用来清空
+func (t *SendNodes) clearNodes() {
+	t.closeNodes()
+	t.nodes = make(map[string]*NodeInfo)
 }

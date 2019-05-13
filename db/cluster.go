@@ -2,6 +2,7 @@ package db
 
 import (
 	"errors"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -59,15 +60,17 @@ type InitConfig struct {
 }
 
 // NewInitConfig 用来创建InitConfig
-func NewInitConfig(maxTargetNum int, maxFailNum int, nodeAddr string,
-	maxAddNodeNum int, redisAddr string, redisPWD string) *InitConfig {
+func NewInitConfig(maxTargetNum int, maxFailNum int, maxFailResetNum int,
+	nodeAddr string, maxAddNodeNum int, redisAddr string,
+	redisPWD string) *InitConfig {
 	return &InitConfig{
-		maxTargetNum:  maxTargetNum,
-		maxFailNum:    maxFailNum,
-		nodeAddr:      nodeAddr,
-		maxAddNodeNum: maxAddNodeNum,
-		redisAddr:     redisAddr,
-		redisPWD:      redisPWD,
+		maxTargetNum:    maxTargetNum,
+		maxFailNum:      maxFailNum,
+		maxFailResetNum: maxFailResetNum,
+		nodeAddr:        nodeAddr,
+		maxAddNodeNum:   maxAddNodeNum,
+		redisAddr:       redisAddr,
+		redisPWD:        redisPWD,
 	}
 }
 
@@ -161,6 +164,12 @@ func (m *Maintainer) Close() {
 	m.Wait()
 }
 
+// giveUpAddNode 放弃自己的的"加令牌节点"的身份
+func (m *Maintainer) giveUpAddNode() {
+	m.toNodes.clearNodes()
+	m.isAddNode = false
+}
+
 // 获取有效的节点在redis中如何存储
 func getValidNodeAddr(nodeAddr string) string {
 	return "1:" + nodeAddr
@@ -230,9 +239,13 @@ func (m *Maintainer) startInit() error {
 	m.isAddNode = true
 
 	// 如果成为"加令牌节点"，则需要和其他"加令牌节点"进行通信
-	tcpNodeAddrs, err := m.getTCPNodeAddrs()
+	tcpNodeAddrs, exist, err := m.getTCPNodeAddrs()
 	if err != nil {
 		return err
+	}
+	if !exist {
+		m.giveUpAddNode()
+		return nil
 	}
 	// 建立tcp连接，如果连接失败，则在真正的事件循环时，
 	// 申请移除这个节点
@@ -248,9 +261,13 @@ func (m *Maintainer) handlePushMsg() error {
 	if !m.isAddNode {
 		return nil
 	}
-	tcpNodeAddrs, err := m.getTCPNodeAddrs()
+	tcpNodeAddrs, exist, err := m.getTCPNodeAddrs()
 	if err != nil {
 		return err
+	}
+	if !exist {
+		m.giveUpAddNode()
+		return nil
 	}
 	// 移除非"加令牌节点", 添加"加令牌节点"
 	origTCPNodeAddrs := m.toNodes.getNodeAddrs()
@@ -272,9 +289,13 @@ func (m *Maintainer) handleRemMsg() error {
 		m.isAddNode = ok
 		return nil
 	}
-	tcpNodeAddrs, err := m.getTCPNodeAddrs()
+	tcpNodeAddrs, exist, err := m.getTCPNodeAddrs()
 	if err != nil {
 		return err
+	}
+	if !exist {
+		m.giveUpAddNode()
+		return m.handleRemMsg()
 	}
 	// 移除非"加令牌节点", 这里理论上也应该处理增加节点，
 	// 不过，如果没有新节点出现，处理意义不大
@@ -300,19 +321,22 @@ func (m *Maintainer) handleSetMsg(failNodeAddr *string) error {
 	if err != nil {
 		return err
 	}
-	// 处理（2)，如果有节点被设置有效，查看是否为自己监听的失败接口
-	ok, err := m.findAddNode(getValidNodeAddr(*failNodeAddr))
-	if err != nil {
-		return err
-	}
-	if ok {
-		*failNodeAddr = ""
+	if len(*failNodeAddr) != 0 {
+		// 处理（2)，如果有节点被设置有效，查看是否为自己监听的失败接口
+		ok, err := m.findAddNode(getValidNodeAddr(*failNodeAddr))
+		if err != nil {
+			return err
+		}
+		if ok {
+			*failNodeAddr = ""
+		}
 	}
 	return nil
 }
 
 // handleMsg 用来处理消息
-func (m *Maintainer) handleMsg(msg *redis.Message, failNodeAddr *string) (int, error) {
+func (m *Maintainer) handleMsg(msg *redis.Message, failNodeAddr *string) error {
+	log.Printf("msg.Payload:%+v\n", msg)
 	// 如果这个节点是加令牌节点
 	payload := msg.Payload
 	// 处理消息
@@ -320,18 +344,20 @@ func (m *Maintainer) handleMsg(msg *redis.Message, failNodeAddr *string) (int, e
 	case "lpush":
 		fallthrough
 	case "rpush":
-		return 0, m.handlePushMsg()
+		return m.handlePushMsg()
 	case "lrem":
-		return 1, m.handleRemMsg()
+		return m.handleRemMsg()
 	case "lset":
-		return 2, m.handleSetMsg(failNodeAddr)
+		return m.handleSetMsg(failNodeAddr)
 	}
 
-	return -1, nil
+	return nil
 }
 
 // RunLoop 是主事件循环
 func (m *Maintainer) RunLoop() error {
+	// 这里可能需要添加一个每隔多少秒检测当前节点是否为真正的"加令牌节点"
+	// 暂时不进行添加，这个是在一个节点断开一段时间，然后又重新连接时会出现
 	var realFailNodeAddr string
 	failResetCount := 0
 	var wg sync.WaitGroup
@@ -346,9 +372,13 @@ func (m *Maintainer) RunLoop() error {
 			msg = nil
 		}
 		if msg != nil {
-			m.handleMsg(msg, &realFailNodeAddr)
+			mayClear := (len(realFailNodeAddr) != 0)
+			err := m.handleMsg(msg, &realFailNodeAddr)
+			if err != nil {
+				return err
+			}
 			// 如果已经清除
-			if len(realFailNodeAddr) == 0 {
+			if mayClear && len(realFailNodeAddr) == 0 {
 				failResetCount = 0
 				m.toNodes.resetFailNode(realFailNodeAddr)
 			}
@@ -387,12 +417,16 @@ func (m *Maintainer) RunLoop() error {
 			failResetCount++
 			// 如果已经等待了足够的时间，则清理这个无效的节点
 			if failResetCount > m.maxFailResetNum {
-				m.removeInvalidAddNode(realFailNodeAddr)
+				err := m.removeInvalidAddNode(realFailNodeAddr)
+				if err != nil {
+					log.Printf("m.removeInvalidAddNode error: %v\n", err)
+				}
 				failResetCount = 0
 				realFailNodeAddr = ""
 			}
 			time.Sleep(timeOut)
 		}
+
 	}
 }
 
@@ -417,6 +451,7 @@ func (m *Maintainer) tryBeAddNode() (bool, error) {
 		then 
 			return false
 		end
+		redis.call("LREM", KEYS[1], -1, ARGV[2])
 		redis.call("RPUSH", KEYS[1], ARGV[2])
 		return true
 		`
@@ -452,9 +487,9 @@ func (m *Maintainer) resetAddNode(curNodeAddr string, setNodeAddr string) (bool,
 		local nodeAddrs = redis.call("LRANGE", KEYS[1], 0, -1)
 		for key, value in pairs(nodeAddrs) do
 		if (value == ARGV[1])
+		then
 			redis.call("LSET", KEYS[1], key-1, ARGV[2])
 			return true
-		then
 		end
 		end
 		return false
@@ -491,8 +526,8 @@ func (m *Maintainer) findAddNode(realNodeAddr string) (bool, error) {
 		local nodeAddrs = redis.call("LRANGE", KEYS[1], 0, -1)
 		for key, value in pairs(nodeAddrs) do
 		if (value == ARGV[1])
-			return true
 		then
+			return true
 		end
 		end
 		return false
@@ -535,19 +570,19 @@ func (m *Maintainer) removeAddNode(realNodeAddr string) error {
 	return err
 }
 
-// 获取tcp通信的节点名
-func (m *Maintainer) getTCPNodeAddrs() ([]string, error) {
+// 获取tcp通信的节点名，其中第二个返回值表示是否存在自己
+func (m *Maintainer) getTCPNodeAddrs() ([]string, bool, error) {
 	allNodeAddrs, err := m.getAllNodeAddrs()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	nodeAddrs, ok := m.getNextNNodeAddrs(allNodeAddrs)
 	if !ok {
-		return nil, errors.New("Couldn't find self in all add node addrs")
+		return nil, false, nil
 	}
 
-	return nodeAddrs, nil
+	return nodeAddrs, true, nil
 }
 
 // 获取所有节点名
