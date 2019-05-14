@@ -21,3 +21,5 @@ go test ratelimiter/db -args "localhost:30001 localhost:30002 localhost:30003" "
   也没有与更新操作相结合，所以，不建议在实际运行中使用这个实现，我打算使用redis的subscribe和publish  
   来实现一个更加简单的版本，那个版本应该更合适使用  
 (4) 上述代码中如果存在什么问题，欢迎指出，如果有人对此进行了benchmark，也欢迎添加到README中  
+(5) redis键空间提醒*redis.Message channel缓存的默认大小为100，我没有测试，  
+如果这个满了之后，会出现什么情况。这里可以考虑添加一个go程将消息中间存储。
