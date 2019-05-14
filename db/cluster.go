@@ -364,14 +364,18 @@ func (m *Maintainer) RunLoop() error {
 	timeOut := time.Second
 	timeOutThres := time.Duration(0.99 * float64(timeOut))
 	for {
-		// 处理redis键监听消息
-		var msg *redis.Message
-		select {
-		case msg = <-m.keyMsgChan:
-		default:
-			msg = nil
-		}
-		if msg != nil {
+		// 如果存在消息，则一直处理消息
+		for {
+			// 处理redis键监听消息
+			var msg *redis.Message
+			select {
+			case msg = <-m.keyMsgChan:
+			default:
+				msg = nil
+			}
+			if msg == nil {
+				break
+			}
 			mayClear := (len(realFailNodeAddr) != 0)
 			err := m.handleMsg(msg, &realFailNodeAddr)
 			if err != nil {

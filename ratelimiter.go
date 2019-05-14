@@ -31,4 +31,5 @@ func main() {
 	if err != nil {
 		log.Fatalf("m.RunLoop error: %v\n", err)
 	}
+	m.Close()
 }
